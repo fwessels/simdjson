@@ -205,8 +205,12 @@ namespace simdjson::haswell::simd {
 
     // Order-specific operations
     really_inline simd8<uint8_t> max(const simd8<uint8_t> other) const { return _mm256_max_epu8(*this, other); }
-    really_inline simd8<uint8_t> min(const simd8<uint8_t> other) const { return _mm256_min_epu8(*this, other); }
+    really_inline simd8<uint8_t> min(const simd8<uint8_t> other) const { return _mm256_min_epu8(other, *this); }
     really_inline simd8<bool> operator<=(const simd8<uint8_t> other) const { return other.max(*this) == other; }
+    // if max(a,b) == b, then b >= a
+    // if max(a,b) == a, then a >= b
+    // if min(a,b) == a, then a <= b
+    // if min(a,b) == b, then b <= a
     really_inline simd8<bool> operator>=(const simd8<uint8_t> other) const { return other.min(*this) == other; }
     really_inline simd8<bool> operator>(const simd8<uint8_t> other) const { return this->saturating_sub(other).any_bits_set(); }
 
