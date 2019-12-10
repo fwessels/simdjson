@@ -119,6 +119,8 @@ namespace simdjson::arm64::simd {
     really_inline simd8<uint8_t>& operator-=(const simd8<uint8_t> other) { *this = *this - other; return *this; }
 
     // Order-specific operations
+    really_inline uint8_t max() const { return vmaxvq_u8(*this); }
+    really_inline uint8_t min() const { return vminvq_u8(*this); }
     really_inline simd8<uint8_t> max(const simd8<uint8_t> other) const { return vmaxq_u8(*this, other); }
     really_inline simd8<uint8_t> min(const simd8<uint8_t> other) const { return vminq_u8(*this, other); }
     really_inline simd8<bool> operator<=(const simd8<uint8_t> other) const { return vcleq_u8(*this, other); }
@@ -128,7 +130,7 @@ namespace simdjson::arm64::simd {
 
     // Bit-specific operations
     really_inline simd8<bool> any_bits_set(simd8<uint8_t> bits) const { return vtstq_u8(*this, bits); }
-    really_inline bool any_bits_set_anywhere() const { return vmaxvq_u8(*this) != 0; }
+    really_inline bool any_bits_set_anywhere() const { return this->max() != 0; }
     really_inline bool any_bits_set_anywhere(simd8<uint8_t> bits) const { return (*this & bits).any_bits_set_anywhere(); }
     template<int N>
     really_inline simd8<uint8_t> shr() const { return vshrq_n_u8(*this, N); }
