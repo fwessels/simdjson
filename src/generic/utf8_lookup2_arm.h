@@ -427,7 +427,7 @@ struct utf8_checker {
 
   really_inline void check_next_input(simd8x64<uint8_t> input) {
     simd8<uint8_t> bits = input.reduce([&](auto a,auto b) { return a|b; });
-    if (likely(!bits.any_bits_set_anywhere(0b10000000u))) {
+    if (likely(bits.max() < 0b10000000u)) {
       // If the previous block had incomplete UTF-8 characters at the end, an ASCII block can't
       // possibly finish them.
       this->error |= this->prev_incomplete;

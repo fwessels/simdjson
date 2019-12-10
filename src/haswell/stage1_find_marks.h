@@ -48,7 +48,7 @@ really_inline simd8<uint8_t> lookup_flipped_low_bits(
   );
 }
 
-#include "generic/utf8_lookup2_arm.h"
+#include "generic/utf8_lookup2_intel.h"
 #include "generic/stage1_find_marks.h"
 
 } // namespace haswell
