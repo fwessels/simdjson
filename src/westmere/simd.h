@@ -192,13 +192,20 @@ namespace simdjson::westmere::simd {
     // Order-specific operations
     really_inline simd8<uint8_t> max(const simd8<uint8_t> other) const { return _mm_max_epu8(*this, other); }
     really_inline simd8<uint8_t> min(const simd8<uint8_t> other) const { return _mm_min_epu8(*this, other); }
+    // Same as >, but only guarantees true is nonzero (< guarantees true = -1)
+    really_inline simd8<uint8_t> gt_bits(const simd8<uint8_t> other) const { return this->saturating_sub(other); }
+    // Same as <, but only guarantees true is nonzero (< guarantees true = -1)
+    really_inline simd8<uint8_t> lt_bits(const simd8<uint8_t> other) const { return other.saturating_sub(*this); }
     really_inline simd8<bool> operator<=(const simd8<uint8_t> other) const { return other.max(*this) == other; }
     really_inline simd8<bool> operator>=(const simd8<uint8_t> other) const { return other.min(*this) == other; }
-    really_inline simd8<bool> operator>(const simd8<uint8_t> other) const { return this->saturating_sub(other).any_bits_set(); }
+    really_inline simd8<bool> operator>(const simd8<uint8_t> other) const { return this->gt_bits(other).any_bits_set(); }
+    really_inline simd8<bool> operator<(const simd8<uint8_t> other) const { return this->gt_bits(other).any_bits_set(); }
 
     // Bit-specific operations
-    really_inline simd8<bool> any_bits_set(simd8<uint8_t> bits) const { return (*this & bits).any_bits_set(); }
-    really_inline simd8<bool> any_bits_set() const { return ~(*this == uint8_t(0)); }
+    really_inline simd8<bool> bits_not_set() const { return *this == uint8_t(0); }
+    really_inline simd8<bool> bits_not_set(simd8<uint8_t> bits) const { return (*this & bits).bits_not_set(); }
+    really_inline simd8<bool> any_bits_set() const { return ~this->bits_not_set(); }
+    really_inline simd8<bool> any_bits_set(simd8<uint8_t> bits) const { return ~this->bits_not_set(bits); }
     really_inline bool bits_not_set_anywhere() const { return _mm_testz_si128(*this, *this); }
     really_inline bool any_bits_set_anywhere() const { return !bits_not_set_anywhere(); }
     really_inline bool bits_not_set_anywhere(simd8<uint8_t> bits) const { return _mm_testz_si128(*this, bits); }

@@ -14,9 +14,7 @@ namespace simdjson::haswell {
 
 using namespace simd;
 
-really_inline void find_whitespace_and_operators(
-  const simd::simd8x64<uint8_t> in,
-  uint64_t &whitespace, uint64_t &op) {
+really_inline void find_whitespace_and_operators(simd8x64<uint8_t> in, uint64_t &whitespace, uint64_t &op) {
 
   // These lookups rely on the fact that anything < 127 will match the lower 4 bits, which is why
   // we can't use the generic lookup_16.
@@ -33,22 +31,20 @@ really_inline void find_whitespace_and_operators(
   }).to_bitmask();
 }
 
-really_inline simd8<uint8_t> lookup_flipped_low_bits(
-  simd8<uint8_t> flipped,
-  uint8_t in1, uint8_t in2, uint8_t in3, uint8_t in4, uint8_t in5, uint8_t in6, uint8_t in7, uint8_t in8,
-  uint8_t in9, uint8_t in10, uint8_t in11, uint8_t in12, uint8_t in13, uint8_t in14, uint8_t in15, uint8_t in16
-) {
-  // This is a super Intel-focused trick. Generally you have to mask out the high bits before doing
-  // a table lookup, but on Intel the 16-bit table lookup ignores all bits except the bottom 4 and
-  // the high bit. If the high bit is 1, it always returns 0. prev1_flipped will only be 1 if it's
-  // ASCII, and we're not detecting any ASCII errors here anyway, so it's all good :)
-  return flipped.lookup_16<uint8_t>(
-    in1, in2, in3, in4, in5, in6, in7, in8,
-    in9, in10, in11, in12, in13, in14, in15, in16
-  );
+really_inline bool is_ascii(simd8x64<uint8_t> input) {
+  simd8<uint8_t> bits = input.reduce([&](auto a,auto b) { return a|b; });
+  return !bits.any_bits_set_anywhere(0b10000000u);
 }
 
-#include "generic/utf8_lookup2_intel.h"
+really_inline simd8<bool> must_be_continuation(simd8<uint8_t> prev1, simd8<uint8_t> prev2, simd8<uint8_t> prev3) {
+  simd8<uint8_t> is_second_byte = prev1.saturating_sub(0b11000000u-1); // Only 11______ will be > 0
+  simd8<uint8_t> is_third_byte  = prev2.saturating_sub(0b11100000u-1); // Only 111_____ will be > 0
+  simd8<uint8_t> is_fourth_byte = prev3.saturating_sub(0b11110000u-1); // Only 1111____ will be > 0
+  // Caller requires a bool (all 1's). All values resulting from the subtraction will be <= 64, so signed comparison is fine.
+  return simd8<int8_t>(is_second_byte | is_third_byte | is_fourth_byte) > int8_t(0);
+}
+
+#include "generic/utf8_lookup2_algorithm.h"
 #include "generic/stage1_find_marks.h"
 
 } // namespace haswell

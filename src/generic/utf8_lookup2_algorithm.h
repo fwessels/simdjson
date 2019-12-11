@@ -65,30 +65,78 @@ using namespace simd;
 
 namespace utf8_validation {
 
-} // namespace utf8_validation
+  //
+  // Find special case UTF-8 errors where the character is technically readable (has the right length)
+  // but the *value* is disallowed.
+  //
+  // This includes overlong encodings, surrogates and values too large for Unicode.
+  //
+  // It turns out the bad character ranges can all be detected by looking at the first 12 bits of the
+  // UTF-8 encoded character (i.e. all of byte 1, and the high 4 bits of byte 2). This algorithm does a
+  // 3 4-bit table lookups, identifying which errors that 4 bits could match, and then &'s them together.
+  // If all 3 lookups detect the same error, it's an error.
+  //
+  really_inline simd8<uint8_t> check_special_cases(const simd8<uint8_t> input, const simd8<uint8_t> prev1) {
+    //
+    // These are the errors we're going to match for bytes 1-2, by looking at the first three
+    // nibbles of the character: <high bits of byte 1>> & <low bits of byte 1> & <high bits of byte 2>
+    //
+    static const int OVERLONG_2  = 0x01; // 1100000_ 10______ (technically we match 10______ but we could match ________, they both yield errors either way)
+    static const int OVERLONG_3  = 0x02; // 11100000 100_____ ________
+    static const int OVERLONG_4  = 0x04; // 11110000 1000____ ________ ________
+    static const int SURROGATE   = 0x08; // 11101101 [101_]____
+    static const int TOO_LARGE   = 0x10; // 11110100 (1001|101_)____
+    static const int TOO_LARGE_2 = 0x20; // 1111(1___|011_|0101) 10______
 
-struct utf8_checker {
-  // If this is nonzero, there has been a UTF-8 error.
-  simd8<uint8_t> error;
-  // The last 3 bytes of the previous input, with high bit flipped (assuming the last 3 bits input we received, with high bit flipped. (It actually only contains the last 3 values,
-  // set to 0 unless they need more input.)
-  simd8<uint8_t> prev_input_flipped;
-  simd8<bool> prev_incomplete;
+    // After processing the rest of byte 1 (the low bits), we're still not done--we have to check
+    // byte 2 to be sure which things are errors and which aren't.
+    // Since high_bits is byte 5, byte 2 is high_bits.prev<3>
+    static const int CARRY = OVERLONG_2 | TOO_LARGE_2;
+    const simd8<uint8_t> byte_2_high = input.shr<4>().lookup_16<uint8_t>(
+        // ASCII: ________ [0___]____
+        CARRY, CARRY, CARRY, CARRY,
+        // ASCII: ________ [0___]____
+        CARRY, CARRY, CARRY, CARRY,
+        // Continuations: ________ [10__]____
+        CARRY | OVERLONG_3 | OVERLONG_4, // ________ [1000]____
+        CARRY | OVERLONG_3 | TOO_LARGE,  // ________ [1001]____
+        CARRY | TOO_LARGE  | SURROGATE,  // ________ [1010]____
+        CARRY | TOO_LARGE  | SURROGATE,  // ________ [1011]____
+        // Multibyte Leads: ________ [11__]____
+        CARRY, CARRY, CARRY, CARRY
+    );
 
-  // Prepare fast_path_error in case the next block is ASCII
-  really_inline void set_overflow(simd8<uint8_t> input_flipped) {
-    // If the previous input's last 3 bytes match this, they're too short (they ended at EOF):
-    // ... 1111____ 111_____ 11______
-    static const int8_t max_array[32] = {
-      127, 127, 127, 127, 127, 127, 127, 127,
-      127, 127, 127, 127, 127, 127, 127, 127,
-      127, 127, 127, 127, 127, 127, 127, 127,
-      127, 127, 127, 127, 127, 0b01110000u-1, 0b01100000u-1, 0b01000000u-1
-    };
-    const simd8<int8_t> max_value(&max_array[sizeof(max_array)-sizeof(simd8<uint8_t>)]);
-    // Only keep inputs that would overflow.
-    this->prev_input_flipped = input_flipped;
-    this->prev_incomplete = simd8<int8_t>(input_flipped) > max_value;
+    const simd8<uint8_t> byte_1_high = prev1.shr<4>().lookup_16<uint8_t>(
+      // [0___]____ (ASCII)
+      0, 0, 0, 0,                          
+      0, 0, 0, 0,
+      // [10__]____ (continuation)
+      0, 0, 0, 0,
+      // [11__]____ (2+-byte leads)
+      OVERLONG_2, 0,                       // [110_]____ (2-byte lead)
+      OVERLONG_3 | SURROGATE,              // [1110]____ (3-byte lead)
+      OVERLONG_4 | TOO_LARGE | TOO_LARGE_2 // [1111]____ (4+-byte lead)
+    );
+
+    const simd8<uint8_t> byte_1_low = (prev1 & 0x0F).lookup_16<uint8_t>(
+      // ____[00__] ________
+      OVERLONG_2 | OVERLONG_3 | OVERLONG_4, // ____[0000] ________
+      OVERLONG_2,                           // ____[0001] ________
+      0, 0,
+      // ____[01__] ________
+      TOO_LARGE,                            // ____[0100] ________
+      TOO_LARGE_2,
+      TOO_LARGE_2,
+      TOO_LARGE_2,
+      // ____[10__] ________
+      TOO_LARGE_2, TOO_LARGE_2, TOO_LARGE_2, TOO_LARGE_2,
+      // ____[11__] ________
+      TOO_LARGE_2,
+      TOO_LARGE_2 | SURROGATE,                            // ____[1101] ________
+      TOO_LARGE_2, TOO_LARGE_2
+    );
+
+    return byte_1_high & byte_1_low & byte_2_high;
   }
 
   //
@@ -299,155 +347,79 @@ struct utf8_checker {
   // for" the (prev<1> + 128) instruction, because it can be used to save an instruction in
   // check_special_cases()--but we'll talk about that there :)
   //
-  really_inline void check_multibyte_lengths(const simd8<uint8_t> input, const simd8<uint8_t> prev1_flipped, const simd8<uint8_t> input_flipped, const simd8<uint8_t> prev_flipped) {
-    simd8<int8_t> prev2_flipped(input_flipped.prev<2>(prev_flipped));
-    simd8<int8_t> prev3_flipped(input_flipped.prev<3>(prev_flipped));
+  really_inline simd8<uint8_t> check_multibyte_lengths(simd8<uint8_t> input, simd8<uint8_t> prev_input, simd8<uint8_t> prev1) {
+    simd8<uint8_t> prev2 = input.prev<2>(prev_input);
+    simd8<uint8_t> prev3 = input.prev<3>(prev_input);
 
     // Cont is 10000000-101111111 (-65...-128)
-    simd8<uint8_t> is_continuation(simd8<int8_t>(input) < int8_t(-64));
-
-    // 2+-byte lead flipped is 01______ (64-127)
-    // 3+-byte lead flipped is 011_____ (96-127)
-    // 4+-byte lead flipped is 0111____ (112-127)
-    simd8<uint8_t> is_second_byte(simd8<int8_t>(prev1_flipped) > 63);
-    simd8<uint8_t> is_third_byte(prev2_flipped > 95);
-    simd8<uint8_t> is_fourth_byte(prev3_flipped > 111);
-    // Use ^ instead of | for is_second_byte | is_third_byte | is_fourth_byte, because ^ is
-    // commutative. We can do this because we only have to report errors for cases with NO lead bytes,
-    // or exactly ONE, in which case ^ and | yield the same result.
-    this->error |= is_second_byte ^ is_third_byte ^ is_fourth_byte ^ is_continuation;
+    simd8<bool> is_continuation = simd8<int8_t>(input) < int8_t(-64);
+    // must_be_continuation is architecture-specific because Intel doesn't have unsigned comparisons
+    return simd8<uint8_t>(must_be_continuation(prev1, prev2, prev3) ^ is_continuation);
   }
 
   //
-  // Find errors in bytes 1 and 2 together (one single multi-nibble &)
+  // Return nonzero if there are incomplete multibyte characters at the end of the block:
+  // e.g. if there is a 4-byte character, but it's 3 bytes from the end.
   //
-  really_inline void check_special_cases(const simd8<uint8_t> input, const simd8<uint8_t> prev1_flipped) {
+  really_inline simd8<uint8_t> is_incomplete(simd8<uint8_t> input) {
+    // If the previous input's last 3 bytes match this, they're too short (they ended at EOF):
+    // ... 1111____ 111_____ 11______
+    static const uint8_t max_array[32] = {
+      255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 0b11110000u-1, 0b11100000u-1, 0b11000000u-1
+    };
+    const simd8<uint8_t> max_value(&max_array[sizeof(max_array)-sizeof(simd8<uint8_t>)]);
+    return input.gt_bits(max_value);
+  }
+
+  struct utf8_checker {
+    // If this is nonzero, there has been a UTF-8 error.
+    simd8<uint8_t> error;
+    // The last input we received
+    simd8<uint8_t> prev_input_block;
+    // Whether the last input we received was incomplete (used for ASCII fast path)
+    simd8<uint8_t> prev_incomplete;
+
     //
-    // These are the errors we're going to match for bytes 1-2, by looking at the first three
-    // nibbles of the character: <high bits of byte 1>> & <low bits of byte 1> & <high bits of byte 2>
+    // Check whether the current bytes are valid UTF-8.
     //
-    static const int OVERLONG_2  = 0x01; // 1100000_ 10______ (technically we match 10______ but we could match ________, they both yield errors either way)
-    static const int OVERLONG_3  = 0x02; // 11100000 100_____ ________
-    static const int OVERLONG_4  = 0x04; // 11110000 1000____ ________ ________
-    static const int SURROGATE   = 0x08; // 11101101 [101_]____
-    static const int TOO_LARGE   = 0x10; // 11110100 (1001|101_)____
-    static const int TOO_LARGE_2 = 0x20; // 1111(1___|011_|0101) 10______
+    really_inline void check_utf8_bytes(const simd8<uint8_t> input, const simd8<uint8_t> prev_input) {
+      // Flip prev1...prev3 so we can easily determine if they are 2+, 3+ or 4+ lead bytes
+      // (2, 3, 4-byte leads become large positive numbers instead of small negative numbers)
+      simd8<uint8_t> prev1 = input.prev<1>(prev_input);
+      this->error |= check_special_cases(input, prev1);
+      this->error |= check_multibyte_lengths(input, prev_input, prev1);
+    }
 
-    // After processing the rest of byte 1 (the low bits), we're still not done--we have to check
-    // byte 2 to be sure which things are errors and which aren't.
-    // Since high_bits is byte 5, byte 2 is high_bits.prev<3>
-    static const int CARRY = OVERLONG_2 | TOO_LARGE_2;
-    const simd8<uint8_t> byte_2_high = input.shr<4>().lookup_16<uint8_t>(
-        // ASCII: ________ [0___]____
-        CARRY, CARRY, CARRY, CARRY,
-        // ASCII: ________ [0___]____
-        CARRY, CARRY, CARRY, CARRY,
-        // Continuations: ________ [10__]____
-        CARRY | OVERLONG_3 | OVERLONG_4, // ________ [1000]____
-        CARRY | OVERLONG_3 | TOO_LARGE,  // ________ [1001]____
-        CARRY | TOO_LARGE  | SURROGATE,  // ________ [1010]____
-        CARRY | TOO_LARGE  | SURROGATE,  // ________ [1011]____
-        // Multibyte Leads: ________ [11__]____
-        CARRY, CARRY, CARRY, CARRY
-    );
-
-    // NOTE: since we're using prev1_flipped, which flips the high bit, we have to flip the table
-    // we're matching on too (so ASCII has a 1 at the start and the stuff we care about has 0)
-    const simd8<uint8_t> byte_1_high = prev1_flipped.shr<4>().lookup_16<uint8_t>(
-      // [10__]____ (continuation)
-      0, 0, 0, 0,
-      // [11__]____ (2+-byte leads)
-      OVERLONG_2, 0,                       // [110_]____ (2-byte lead)
-      OVERLONG_3 | SURROGATE,              // [1110]____ (3-byte lead)
-      OVERLONG_4 | TOO_LARGE | TOO_LARGE_2, // [1111]____ (4+-byte lead)
-      // [0___]____ (ASCII)
-      0, 0, 0, 0,                          
-      0, 0, 0, 0
-    );
-
-    const simd8<uint8_t> byte_1_low = lookup_flipped_low_bits(prev1_flipped,
-      // ____[00__] ________
-      OVERLONG_2 | OVERLONG_3 | OVERLONG_4, // ____[0000] ________
-      OVERLONG_2,                           // ____[0001] ________
-      0, 0,
-      // ____[01__] ________
-      TOO_LARGE,                            // ____[0100] ________
-      TOO_LARGE_2,
-      TOO_LARGE_2,
-      TOO_LARGE_2,
-      // ____[10__] ________
-      TOO_LARGE_2, TOO_LARGE_2, TOO_LARGE_2, TOO_LARGE_2,
-      // ____[11__] ________
-      TOO_LARGE_2,
-      TOO_LARGE_2 | SURROGATE,                            // ____[1101] ________
-      TOO_LARGE_2, TOO_LARGE_2
-    );
-    this->error |= byte_1_high & byte_1_low & byte_2_high;
-  }
-
-  //
-  // Check whether the current bytes are valid UTF-8.
-  //
-  // This should come down to 22 instructions if all constants are in registers--more if not.
-  //
-  // Instruction Order
-  // =================
-  //
-  // | | | | | | | | |
-  // |---|---|---|---|---|---|---|---|
-  // **check_utf8_bytes** | | | | | | | |
-  // input_flipped   | Bitwise    |            |            |            |            |            |            |
-  // prev1_flipped   |            | Shuffle    |            |            |            |            |            |
-  // **check_special_cases** | | | | | | | |
-  // byte_2_high     | Shift      | Bitwise    | Shuffle    |            |            |            |            |
-  // byte_1_high     |            |            | Shift      | Bitwise    | Shuffle    |            |            |
-  // byte_1_low      |            |            | Shuffle    |            |            |            |            |
-  // error           |            |            |            | Bitwise    |            | Bitwise    | Bitwise    |
-  // **check_multibyte_lengths** | | | | | | | |
-  // prev2_flipped   |            |            | Shuffle    |            |            |            |            |
-  // prev3_flipped   |            |            | Shuffle    |            |            |            |            |
-  // is_continuation | Comparison |            |            |            |            |            |            |
-  // is_second_byte  |            |            | Comparison |            |            |            |            |
-  // is_third_byte   |            |            |            | Comparison |            |            |            |
-  // is_fourth_byte  |            |            |            | Comparison |            |            |            |
-  // error           |            |            |            | Bitwise    | Bitwise    | Bitwise    | Bitwise    |
-  //
-  // Critical Path: 7 instructions
-  //
-  really_inline simd8<uint8_t> check_utf8_bytes(const simd8<uint8_t> input, const simd8<uint8_t> prev_flipped) {
-    // Flip prev1...prev3 so we can easily determine if they are 2+, 3+ or 4+ lead bytes
-    // (2, 3, 4-byte leads become large positive numbers instead of small negative numbers)
-    simd8<uint8_t> input_flipped = input ^ 0x80;
-    simd8<uint8_t> prev1_flipped = input_flipped.prev<1>(prev_flipped);
-    this->check_special_cases(input, prev1_flipped);
-    this->check_multibyte_lengths(input, prev1_flipped, input_flipped, prev_flipped);
-    return input_flipped;
-  }
-
-  // The only problem that can happen at EOF is that a multibyte character is too short.
-  really_inline void check_eof() {
-    // If the previous block had incomplete UTF-8 characters at the end, an ASCII block can't
-    // possibly finish them.
-    this->error |= simd8<uint8_t>(this->prev_incomplete);
-  }
-
-  really_inline void check_next_input(simd8x64<uint8_t> input) {
-    simd8<uint8_t> bits = input.reduce([&](auto a,auto b) { return a|b; });
-    if (likely(!bits.any_bits_set_anywhere(0b10000000u))) {
+    // The only problem that can happen at EOF is that a multibyte character is too short.
+    really_inline void check_eof() {
       // If the previous block had incomplete UTF-8 characters at the end, an ASCII block can't
       // possibly finish them.
-      this->error |= simd8<uint8_t>(this->prev_incomplete);
-    } else {
-      auto prev_flipped = this->check_utf8_bytes(input.chunks[0], this->prev_input_flipped);
-      for (int i=1; i<simd8x64<uint8_t>::NUM_CHUNKS; i++) {
-        prev_flipped = this->check_utf8_bytes(input.chunks[i], prev_flipped);
-      }
-      this->set_overflow(prev_flipped);
+      this->error |= this->prev_incomplete;
     }
-  }
 
-  really_inline ErrorValues errors() {
-    return this->error.any_bits_set_anywhere() ? simdjson::UTF8_ERROR : simdjson::SUCCESS;
-  }
+    really_inline void check_next_input(simd8x64<uint8_t> input) {
+      if (likely(is_ascii(input))) {
+        // If the previous block had incomplete UTF-8 characters at the end, an ASCII block can't
+        // possibly finish them.
+        this->error |= this->prev_incomplete;
+      } else {
+        this->check_utf8_bytes(input.chunks[0], this->prev_input_block);
+        for (int i=1; i<simd8x64<uint8_t>::NUM_CHUNKS; i++) {
+          this->check_utf8_bytes(input.chunks[i], input.chunks[i-1]);
+        }
+        this->prev_incomplete = is_incomplete(input.chunks[simd8x64<uint8_t>::NUM_CHUNKS-1]);
+        this->prev_input_block = input.chunks[simd8x64<uint8_t>::NUM_CHUNKS-1];
+      }
+    }
 
-}; // struct utf8_checker
+    really_inline ErrorValues errors() {
+      return this->error.any_bits_set_anywhere() ? simdjson::UTF8_ERROR : simdjson::SUCCESS;
+    }
+
+  }; // struct utf8_checker
+}
+
+using utf8_validation::utf8_checker;
