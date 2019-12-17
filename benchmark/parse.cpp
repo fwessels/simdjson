@@ -185,12 +185,23 @@ int main(int argc, char *argv[]) {
 
   // Run the benchmarks
   progress_bar progress(options.iterations, 50);
-  for (int iteration = 0; iteration < options.iterations; iteration += options.iteration_step) {
-    if (!options.verbose) { progress.print(iteration); }
-    // Benchmark each file once per iteration
-    for (size_t f=0; f<options.files.size(); f++) {
-      verbose() << "[verbose] " << benchmarkers[f]->filename << " iterations #" << iteration << "-" << (iteration+options.iteration_step-1) << endl;
-      benchmarkers[f]->run_iterations(options.iteration_step, options.stage1_only);
+  if (options.stage1_only) {
+    for (int iteration = 0; iteration < options.iterations; iteration += options.iteration_step) {
+      if (!options.verbose) { progress.print(iteration); }
+      // Benchmark each file once per iteration
+      for (size_t f=0; f<options.files.size(); f++) {
+        verbose() << "[verbose] " << benchmarkers[f]->filename << " iterations #" << iteration << "-" << (iteration+options.iteration_step-1) << endl;
+        benchmarkers[f]->run_iterations(options.iteration_step, true);
+      }
+    }
+  } else {
+    for (int iteration = 0; iteration < options.iterations; iteration += options.iteration_step) {
+      if (!options.verbose) { progress.print(iteration); }
+      // Benchmark each file once per iteration
+      for (size_t f=0; f<options.files.size(); f++) {
+        verbose() << "[verbose] " << benchmarkers[f]->filename << " iterations #" << iteration << "-" << (iteration+options.iteration_step-1) << endl;
+        benchmarkers[f]->run_iterations(options.iteration_step, false);
+      }
     }
   }
   if (!options.verbose) { progress.erase(); }

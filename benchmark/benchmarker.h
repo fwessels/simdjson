@@ -253,7 +253,7 @@ struct benchmarker {
     return all_stages.iterations;
   }
 
-  void run_iteration(bool stage1_only=false) {
+  really_inline void run_iteration(bool stage1_only=false) {
     // Allocate ParsedJson
     collector.start();
     ParsedJson pj;
@@ -301,7 +301,7 @@ struct benchmarker {
     }
   }
 
-  void run_iterations(size_t iterations, bool stage1_only=false) {
+  really_inline void run_iterations(size_t iterations, bool stage1_only=false) {
     for (size_t i = 0; i<iterations; i++) {
       run_iteration(stage1_only);
     }
